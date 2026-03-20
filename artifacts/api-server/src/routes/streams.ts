@@ -12,6 +12,36 @@ interface StreamSource {
   isHLS: boolean;
 }
 
+function isValidUrl(url: unknown): url is string {
+  return (
+    typeof url === "string" &&
+    url.length > 0 &&
+    (url.startsWith("http://") || url.startsWith("https://")) &&
+    url !== "undefined" &&
+    url !== "null"
+  );
+}
+
+function makeSource(name: string, url: string): StreamSource {
+  return {
+    name,
+    embedUrl: url,
+    proxyUrl: `/api/proxy?url=${encodeURIComponent(url)}`,
+    isHLS: url.includes(".m3u8"),
+  };
+}
+
+function extractUrl(obj: Record<string, unknown>): string | null {
+  const candidates = [
+    obj["url"], obj["src"], obj["link"], obj["file"],
+    obj["hls"], obj["mp4"], obj["stream"], obj["href"],
+  ];
+  for (const val of candidates) {
+    if (isValidUrl(val)) return val;
+  }
+  return null;
+}
+
 async function fetchEpisodeStreams(
   id: string,
   type: string,
@@ -21,91 +51,72 @@ async function fetchEpisodeStreams(
 ): Promise<StreamSource[]> {
   const sources: StreamSource[] = [];
 
-  const apiEndpoint = `${BASE_URL}/ajax/movie/episode/servers?id=${id}&type=${encodeURIComponent(type)}&detailSe=${detailSe}&detailEp=${detailEp}&lang=${lang}`;
-
-  const apiResponse = await fetch(apiEndpoint, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      Accept: "application/json, text/javascript, */*; q=0.01",
-      "X-Requested-With": "XMLHttpRequest",
-      Referer: BASE_URL,
-      Origin: BASE_URL,
-    },
-  });
-
-  if (!apiResponse.ok) return sources;
-
-  const apiData = (await apiResponse.json()) as Record<string, unknown>;
-
-  if (Array.isArray(apiData["sources"])) {
-    for (const source of apiData["sources"] as Record<string, unknown>[]) {
-      const srcUrl = String(source["src"] || source["url"] || source["file"] || "");
-      if (!srcUrl) continue;
-      const isHLS = srcUrl.includes(".m3u8");
-      sources.push({
-        name: String(source["label"] || source["name"] || "Source"),
-        embedUrl: srcUrl,
-        proxyUrl: `/api/proxy?url=${encodeURIComponent(srcUrl)}`,
-        isHLS,
-      });
-    }
-  }
-
-  if (typeof apiData["html"] === "string" && apiData["html"].length > 0) {
-    const { load } = await import("cheerio");
-    const $api = load(apiData["html"]);
-    const serverIds: Array<{ id: string; name: string }> = [];
-
-    $api("a[data-id], [data-linkid]").each((_, el) => {
-      const $el = $api(el);
-      const serverId = $el.attr("data-id") || $el.attr("data-linkid") || "";
-      if (serverId) serverIds.push({ id: serverId, name: $el.text().trim() || serverId });
+  try {
+    const apiEndpoint = `${BASE_URL}/ajax/movie/episode/servers?id=${id}&type=${encodeURIComponent(type)}&detailSe=${detailSe}&detailEp=${detailEp}&lang=${lang}`;
+    const apiResponse = await fetch(apiEndpoint, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        Referer: BASE_URL,
+        Origin: BASE_URL,
+      },
     });
 
-    for (const server of serverIds) {
-      try {
-        const srcRes = await fetch(
-          `${BASE_URL}/ajax/movie/episode/server/sources?id=${server.id}`,
-          {
-            headers: {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-              "X-Requested-With": "XMLHttpRequest",
-              Referer: BASE_URL,
-            },
-          },
-        );
-        if (!srcRes.ok) continue;
-        const srcData = (await srcRes.json()) as Record<string, unknown>;
-        const url = String(
-          (srcData["data"] as Record<string, unknown>)?.["link"] ||
-          srcData["url"] ||
-          srcData["src"] ||
-          "",
-        );
+    if (!apiResponse.ok) return sources;
+    const apiData = (await apiResponse.json()) as Record<string, unknown>;
+
+    if (Array.isArray(apiData["sources"])) {
+      for (const source of apiData["sources"] as Record<string, unknown>[]) {
+        const url = extractUrl(source);
         if (url) {
-          const isHLS = url.includes(".m3u8");
-          sources.push({
-            name: server.name,
-            embedUrl: url,
-            proxyUrl: `/api/proxy?url=${encodeURIComponent(url)}`,
-            isHLS,
-          });
+          sources.push(makeSource(
+            String(source["label"] || source["name"] || "Source"),
+            url,
+          ));
         }
-      } catch {
-        continue;
       }
     }
-  }
 
-  if (typeof apiData["link"] === "string" && apiData["link"]) {
-    const url = apiData["link"] as string;
-    sources.push({
-      name: "API Stream",
-      embedUrl: url,
-      proxyUrl: `/api/proxy?url=${encodeURIComponent(url)}`,
-      isHLS: url.includes(".m3u8"),
-    });
+    if (typeof apiData["html"] === "string" && apiData["html"].length > 0) {
+      const { load } = await import("cheerio");
+      const $api = load(apiData["html"]);
+      const serverIds: Array<{ id: string; name: string }> = [];
+
+      $api("a[data-id], [data-linkid]").each((_, el) => {
+        const $el = $api(el);
+        const serverId = $el.attr("data-id") || $el.attr("data-linkid") || "";
+        if (serverId) serverIds.push({ id: serverId, name: $el.text().trim() || serverId });
+      });
+
+      for (const server of serverIds) {
+        try {
+          const srcRes = await fetch(
+            `${BASE_URL}/ajax/movie/episode/server/sources?id=${server.id}`,
+            {
+              headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "X-Requested-With": "XMLHttpRequest",
+                Referer: BASE_URL,
+              },
+            },
+          );
+          if (!srcRes.ok) continue;
+          const srcData = (await srcRes.json()) as Record<string, unknown>;
+
+          const nested = srcData["data"] as Record<string, unknown> | undefined;
+          const url = (nested ? extractUrl(nested) : null) ?? extractUrl(srcData);
+          if (url) sources.push(makeSource(server.name, url));
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    const topUrl = extractUrl(apiData);
+    if (topUrl) sources.push(makeSource("API Stream", topUrl));
+  } catch {
+    return sources;
   }
 
   return sources;
@@ -131,19 +142,22 @@ async function fetchH5Streams(
     });
     if (!res.ok) return sources;
     const data = (await res.json()) as Record<string, unknown>;
-    const items = (data["data"] as Record<string, unknown>)?.["streams"] ||
-      (data["data"] as unknown) ||
+
+    const dataField = data["data"] as Record<string, unknown> | undefined;
+    const rawItems =
+      (dataField?.["streams"]) ??
+      (Array.isArray(dataField) ? dataField : null) ??
       data["streams"];
-    if (Array.isArray(items)) {
-      for (const item of items as Record<string, unknown>[]) {
-        const url = String(item["url"] || item["src"] || item["link"] || "");
-        if (!url) continue;
-        sources.push({
-          name: String(item["format"] || item["label"] || "Stream"),
-          embedUrl: url,
-          proxyUrl: `/api/proxy?url=${encodeURIComponent(url)}`,
-          isHLS: url.includes(".m3u8"),
-        });
+
+    if (Array.isArray(rawItems)) {
+      for (const item of rawItems as Record<string, unknown>[]) {
+        const url = extractUrl(item);
+        if (url) {
+          sources.push(makeSource(
+            String(item["format"] || item["label"] || item["quality"] || "Stream"),
+            url,
+          ));
+        }
       }
     }
   } catch {
@@ -185,8 +199,7 @@ router.get("/streams", async (req, res) => {
     if (!sources.length) {
       const pageResponse = await fetch(targetUrl, {
         headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
           Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           "Accept-Language": "en-US,en;q=0.5",
           Referer: BASE_URL,
@@ -200,8 +213,8 @@ router.get("/streams", async (req, res) => {
 
         $("iframe[src*='//'], iframe[data-src*='//']").each((_, el) => {
           const src = $(el).attr("src") || $(el).attr("data-src") || "";
-          if (src && !sources.find((s) => s.embedUrl === src)) {
-            sources.push({ name: "Embed", embedUrl: src, proxyUrl: `/api/proxy?url=${encodeURIComponent(src)}`, isHLS: false });
+          if (isValidUrl(src) && !sources.find((s) => s.embedUrl === src)) {
+            sources.push(makeSource("Embed", src));
           }
         });
 
@@ -209,29 +222,25 @@ router.get("/streams", async (req, res) => {
           const content = $(script).html() || "";
           for (const match of content.matchAll(/["'](https?:\/\/[^"']+\.(?:mp4|m3u8|ts)[^"']*?)["']/g)) {
             const streamUrl = match[1];
-            if (!sources.find((s) => s.embedUrl === streamUrl)) {
-              sources.push({
-                name: streamUrl.includes(".m3u8") ? "HLS" : "MP4",
-                embedUrl: streamUrl,
-                proxyUrl: `/api/proxy?url=${encodeURIComponent(streamUrl)}`,
-                isHLS: streamUrl.includes(".m3u8"),
-              });
+            if (isValidUrl(streamUrl) && !sources.find((s) => s.embedUrl === streamUrl)) {
+              sources.push(makeSource(streamUrl.includes(".m3u8") ? "HLS" : "MP4", streamUrl));
             }
           }
         }
       }
     }
 
-    const success = sources.length > 0;
+    const validSources = sources.filter((s) => isValidUrl(s.embedUrl));
+
     res.json({
-      success,
+      success: validSources.length > 0,
       id,
       type,
       season: detailSe || null,
       episode: detailEp || null,
-      sources,
-      streams: sources.filter((s) => !s.isHLS),
-      hls: sources.filter((s) => s.isHLS),
+      sources: validSources,
+      streams: validSources.filter((s) => !s.isHLS),
+      hls: validSources.filter((s) => s.isHLS),
     });
   } catch (err) {
     req.log.error({ err }, "Streams error");
