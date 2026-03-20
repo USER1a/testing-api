@@ -4,9 +4,9 @@ import { searchMovies } from "./search.js";
 const router = Router();
 
 const SITE_BASE = "https://themoviebox.org";
-const STREAMS_API = "https://testing-api-api-server.vercel.app/api/streams";
+const UPSTREAM_STREAMS = "https://testing-api-server.vercel.app/api/streams";
 
-interface StreamItem {
+interface UpstreamStream {
   format: string;
   id: string;
   url: string;
@@ -14,6 +14,21 @@ interface StreamItem {
   size: string;
   duration: number;
   codecName: string;
+}
+
+interface UpstreamResponse {
+  success: boolean;
+  subjectId: string;
+  slug: string;
+  title: string;
+  coverUrl: string;
+  se: number;
+  ep: number;
+  streams: UpstreamStream[];
+  hls: Array<{ url: string }>;
+  dash: Array<{ url: string }>;
+  freeNum: number;
+  limited: boolean;
 }
 
 function buildMovieboxUrl(
@@ -25,63 +40,29 @@ function buildMovieboxUrl(
 ): string {
   const isTV = subjectType !== 0 || season !== null || episode !== null;
   const type = isTV ? "/tv/detail" : "/movie/detail";
-  const detailSe = isTV && season !== null ? String(season) : "";
-  const detailEp = isTV && episode !== null ? String(episode) : "";
+  const detailSe = season !== null ? String(season) : "";
+  const detailEp = episode !== null ? String(episode) : "";
   return (
     `${SITE_BASE}/movies/${detailPath}` +
     `?id=${subjectId}&type=${encodeURIComponent(type)}&detailSe=${detailSe}&detailEp=${detailEp}&lang=en`
   );
 }
 
-async function fetchStreamsForUrl(movieboxUrl: string): Promise<{
-  success: boolean;
-  streams: StreamItem[];
-  hls: Array<{ url: string }>;
-  title: string;
-  coverUrl: string;
-  se: number;
-  ep: number;
-  totalEpisodes: number;
-  freeNum: number;
-  limited: boolean;
-} | null> {
+async function fetchStreams(movieboxUrl: string): Promise<UpstreamResponse | null> {
   try {
     const res = await fetch(
-      `${STREAMS_API}?url=${encodeURIComponent(movieboxUrl)}`,
+      `${UPSTREAM_STREAMS}?url=${encodeURIComponent(movieboxUrl)}`,
       {
         headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
           Accept: "application/json",
         },
       },
     );
     if (!res.ok) return null;
-    const data = (await res.json()) as {
-      success: boolean;
-      streams?: StreamItem[];
-      hls?: Array<{ url: string }>;
-      title?: string;
-      coverUrl?: string;
-      se?: number;
-      ep?: number;
-      totalEpisodes?: number;
-      freeNum?: number;
-      limited?: boolean;
-    };
+    const data = (await res.json()) as UpstreamResponse;
     if (!data.success || !data.streams?.length) return null;
-    return {
-      success: true,
-      streams: data.streams || [],
-      hls: data.hls || [],
-      title: data.title || "",
-      coverUrl: data.coverUrl || "",
-      se: data.se ?? 1,
-      ep: data.ep ?? 1,
-      totalEpisodes: data.totalEpisodes ?? 0,
-      freeNum: data.freeNum ?? 0,
-      limited: data.limited ?? false,
-    };
+    return data;
   } catch {
     return null;
   }
@@ -93,7 +74,8 @@ router.get("/title", async (req, res) => {
     res.status(400).json({
       error: "Query parameter 'stream' is required",
       usage: "/api/title?stream=ShowName&season=1&episode=1",
-      example: "/api/title?stream=Devil+May+Cry&s=1&e=2",
+      shortForm: "/api/title?stream=ShowName&s=1&e=1",
+      example: "/api/title?stream=Jujutsu+Kaisen&s=1&e=3",
     });
     return;
   }
@@ -116,10 +98,10 @@ router.get("/title", async (req, res) => {
 
     const host =
       req.headers["x-forwarded-host"] || req.headers["host"] || "localhost";
-    const protocol = req.headers["x-forwarded-proto"] || "http";
+    const protocol = req.headers["x-forwarded-proto"] || "https";
     const baseUrl = `${protocol}://${host}`;
 
-    let streamsData = null;
+    let upstreamData: UpstreamResponse | null = null;
     let foundMovie = null;
 
     for (const movie of results.filter((r) => r.hasResource)) {
@@ -131,56 +113,62 @@ router.get("/title", async (req, res) => {
         episode,
       );
       req.log.info({ url: movieboxUrl }, "Trying URL for streams");
-      streamsData = await fetchStreamsForUrl(movieboxUrl);
-      if (streamsData) {
+      upstreamData = await fetchStreams(movieboxUrl);
+      if (upstreamData) {
         foundMovie = movie;
         break;
       }
     }
 
-    if (!streamsData || !foundMovie) {
+    if (!upstreamData || !foundMovie) {
       res.status(502).json({
-        error: "Could not fetch streams for any search result",
+        error: "Could not fetch streams for this title.",
+        hint: "Try omitting season/episode to get the default, or check the title spelling.",
         query,
         season,
         episode,
-        tried: results.filter((r) => r.hasResource).map((r) =>
-          buildMovieboxUrl(r.detailPath, r.subjectId, r.subjectType, season, episode),
-        ),
       });
       return;
     }
 
-    const streams = streamsData.streams.map((s) => {
-      const proxyUrl = `${baseUrl}/api/proxy?url=${encodeURIComponent(s.url)}`;
-      return {
-        format: s.format,
-        resolution: `${s.resolutions}p`,
-        duration: s.duration,
-        sizeMB: Math.round(Number(s.size) / 1024 / 1024),
-        codec: s.codecName,
-        originalUrl: s.url,
-        proxyUrl,
-        iframe: `<iframe src="${proxyUrl}" width="100%" height="500" allowfullscreen frameborder="0" allow="autoplay; encrypted-media"></iframe>`,
-      };
-    });
+    const streams = upstreamData.streams
+      .filter((s) => s.url && s.url.startsWith("http"))
+      .map((s) => {
+        const playerUrl = `${baseUrl}/api/proxy?url=${encodeURIComponent(s.url)}`;
+        return {
+          format: s.format,
+          resolution: `${s.resolutions}p`,
+          duration: s.duration,
+          sizeMB: s.size ? Math.round(Number(s.size) / 1024 / 1024) : null,
+          codec: s.codecName,
+          originalUrl: s.url,
+          playerUrl,
+          iframe: `<iframe src="${playerUrl}" width="100%" height="500" allowfullscreen frameborder="0" allow="autoplay; encrypted-media"></iframe>`,
+        };
+      });
 
-    const hlsStreams = streamsData.hls.map((h) => {
-      const proxyUrl = `${baseUrl}/api/proxy?url=${encodeURIComponent(h.url)}`;
-      return { originalUrl: h.url, proxyUrl };
-    });
+    const hlsStreams = upstreamData.hls
+      .filter((h) => h.url && h.url.startsWith("http"))
+      .map((h) => ({
+        originalUrl: h.url,
+        playerUrl: `${baseUrl}/api/proxy?url=${encodeURIComponent(h.url)}`,
+      }));
 
     const primaryStream = streams[streams.length - 1] || null;
 
     res.json({
       query,
-      episode: {
-        season: streamsData.se,
-        episode: streamsData.ep,
-        totalEpisodes: streamsData.totalEpisodes || null,
-      },
+      requested: { season, episode },
+      returned: { season: upstreamData.se, episode: upstreamData.ep },
       movie: {
-        title: streamsData.title || foundMovie.title,
+        title: upstreamData.title || foundMovie.title,
+        subjectId: foundMovie.subjectId,
+        subjectType: foundMovie.subjectType,
+        poster: upstreamData.coverUrl || foundMovie.poster,
+        genre: foundMovie.genre,
+        releaseDate: foundMovie.releaseDate,
+        country: foundMovie.country,
+        imdbRating: foundMovie.imdbRating,
         movieboxUrl: buildMovieboxUrl(
           foundMovie.detailPath,
           foundMovie.subjectId,
@@ -188,19 +176,11 @@ router.get("/title", async (req, res) => {
           season,
           episode,
         ),
-        subjectId: foundMovie.subjectId,
-        subjectType: foundMovie.subjectType,
-        poster: streamsData.coverUrl || foundMovie.poster,
-        genre: foundMovie.genre,
-        releaseDate: foundMovie.releaseDate,
-        country: foundMovie.country,
-        imdbRating: foundMovie.imdbRating,
       },
+      playerUrl: primaryStream?.playerUrl || null,
+      embedIframe: primaryStream?.iframe || null,
       streams,
       hls: hlsStreams,
-      primaryStream,
-      embedUrl: primaryStream?.proxyUrl || null,
-      embedIframe: primaryStream?.iframe || null,
     });
   } catch (err) {
     req.log.error({ err }, "Title stream error");
@@ -209,4 +189,3 @@ router.get("/title", async (req, res) => {
 });
 
 export default router;
-
