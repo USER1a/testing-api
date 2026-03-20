@@ -1,4 +1,9 @@
 import { Router } from "express";
+import {
+  fetchH5Streams,
+  fetchEpisodeStreams,
+  isValidUrl,
+} from "../lib/streams-helper.js";
 
 const router = Router();
 
@@ -20,152 +25,65 @@ router.get("/streams", async (req, res) => {
     const detailSe = parsedUrl.searchParams.get("detailSe") || "";
     const detailEp = parsedUrl.searchParams.get("detailEp") || "";
     const lang = parsedUrl.searchParams.get("lang") || "en";
+    const isTV = type.includes("tv");
 
-    req.log.info({ targetUrl, id, type }, "Fetching streams for URL");
+    req.log.info({ id, type, detailSe, detailEp }, "Fetching streams");
 
-    const pageResponse = await fetch(targetUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        Referer: BASE_URL,
-      },
-    });
+    let sources = [];
 
-    if (!pageResponse.ok) {
-      req.log.error({ status: pageResponse.status }, "Page fetch failed");
-      res.status(502).json({ error: "Failed to fetch page" });
-      return;
+    if (isTV && detailSe && detailEp) {
+      sources = await fetchH5Streams(id, detailSe, detailEp);
     }
 
-    const html = await pageResponse.text();
-    const { load } = await import("cheerio");
-    const $ = load(html);
-
-    const sources: Array<{
-      name: string;
-      embedUrl: string;
-      proxyUrl: string;
-    }> = [];
-
-    const iframeEl = $("iframe[src*='//'], iframe[data-src*='//']");
-    iframeEl.each((_, el) => {
-      const src =
-        $(el).attr("src") || $(el).attr("data-src") || "";
-      if (src && !sources.find((s) => s.embedUrl === src)) {
-        const proxyUrl = `/api/proxy?url=${encodeURIComponent(src)}`;
-        sources.push({ name: "Embed", embedUrl: src, proxyUrl });
-      }
-    });
-
-    const scriptTags = $("script:not([src])").toArray();
-    for (const script of scriptTags) {
-      const scriptContent = $(script).html() || "";
-
-      const mp4Matches = scriptContent.matchAll(
-        /["'](https?:\/\/[^"']+\.(?:mp4|m3u8|ts)[^"']*?)["']/g,
-      );
-      for (const match of mp4Matches) {
-        const streamUrl = match[1];
-        if (!sources.find((s) => s.embedUrl === streamUrl)) {
-          const proxyUrl = `/api/proxy?url=${encodeURIComponent(streamUrl)}`;
-          sources.push({ name: "Direct", embedUrl: streamUrl, proxyUrl });
-        }
-      }
-
-      const iframeMatches = scriptContent.matchAll(
-        /["'](https?:\/\/[^"']*(?:embed|player|stream|play)[^"']*?)["']/gi,
-      );
-      for (const match of iframeMatches) {
-        const embedUrl = match[1];
-        if (
-          !sources.find((s) => s.embedUrl === embedUrl) &&
-          !embedUrl.includes(BASE_URL)
-        ) {
-          const proxyUrl = `/api/proxy?url=${encodeURIComponent(embedUrl)}`;
-          sources.push({ name: "Player", embedUrl, proxyUrl });
-        }
-      }
+    if (!sources.length) {
+      sources = await fetchEpisodeStreams(id, type, detailSe, detailEp, lang);
     }
 
-    const apiEndpoint = `${BASE_URL}/ajax/movie/episode/servers?id=${id}&type=${encodeURIComponent(type)}&detailSe=${detailSe}&detailEp=${detailEp}&lang=${lang}`;
-    req.log.info({ apiEndpoint }, "Trying API endpoint for sources");
-
-    try {
-      const apiResponse = await fetch(apiEndpoint, {
+    if (!sources.length) {
+      const pageResponse = await fetch(targetUrl, {
         headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          Accept: "application/json, text/javascript, */*; q=0.01",
-          "X-Requested-With": "XMLHttpRequest",
-          Referer: targetUrl,
-          Origin: BASE_URL,
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.5",
+          Referer: BASE_URL,
         },
       });
 
-      if (apiResponse.ok) {
-        const apiData = (await apiResponse.json()) as unknown;
-        req.log.info({ apiData }, "Got API response");
+      if (pageResponse.ok) {
+        const html = await pageResponse.text();
+        const { load } = await import("cheerio");
+        const $ = load(html);
 
-        if (typeof apiData === "object" && apiData !== null) {
-          const data = apiData as Record<string, unknown>;
-          if (Array.isArray(data["sources"])) {
-            for (const source of data["sources"] as unknown[]) {
-              if (
-                typeof source === "object" &&
-                source !== null
-              ) {
-                const s = source as Record<string, unknown>;
-                const srcUrl = String(s["src"] || s["url"] || s["file"] || "");
-                const label = String(s["label"] || s["name"] || "Source");
-                if (srcUrl && !sources.find((x) => x.embedUrl === srcUrl)) {
-                  sources.push({
-                    name: label,
-                    embedUrl: srcUrl,
-                    proxyUrl: `/api/proxy?url=${encodeURIComponent(srcUrl)}`,
-                  });
-                }
-              }
-            }
+        $("iframe[src*='//'], iframe[data-src*='//']").each((_, el) => {
+          const src = $(el).attr("src") || $(el).attr("data-src") || "";
+          if (isValidUrl(src) && !sources.find((s) => s.embedUrl === src)) {
+            sources.push({ name: "Embed", embedUrl: src, proxyUrl: `/api/proxy?url=${encodeURIComponent(src)}`, isHLS: src.includes(".m3u8") });
           }
+        });
 
-          if (
-            typeof data["html"] === "string" &&
-            data["html"].length > 0
-          ) {
-            const $api = load(data["html"]);
-            $api("a[data-id], [data-linkid]").each((_, el) => {
-              const $el = $api(el);
-              const serverId =
-                $el.attr("data-id") || $el.attr("data-linkid") || "";
-              const serverName = $el.text().trim();
-              if (serverId) {
-                sources.push({
-                  name: serverName || serverId,
-                  embedUrl: `${BASE_URL}/ajax/movie/episode/server/sources?id=${serverId}`,
-                  proxyUrl: `/api/proxy?url=${encodeURIComponent(`${BASE_URL}/ajax/movie/episode/server/sources?id=${serverId}`)}`,
-                });
-              }
-            });
+        for (const script of $("script:not([src])").toArray()) {
+          const content = $(script).html() || "";
+          for (const match of content.matchAll(/["'](https?:\/\/[^"']+\.(?:mp4|m3u8|ts)[^"']*?)["']/g)) {
+            const streamUrl = match[1];
+            if (isValidUrl(streamUrl) && !sources.find((s) => s.embedUrl === streamUrl)) {
+              sources.push({ name: streamUrl.includes(".m3u8") ? "HLS" : "MP4", embedUrl: streamUrl, proxyUrl: `/api/proxy?url=${encodeURIComponent(streamUrl)}`, isHLS: streamUrl.includes(".m3u8") });
+            }
           }
         }
       }
-    } catch (apiErr) {
-      req.log.warn({ apiErr }, "API endpoint attempt failed, using scraped sources");
     }
 
+    const validSources = sources.filter((s) => isValidUrl(s.embedUrl));
+
     res.json({
-      url: targetUrl,
+      success: validSources.length > 0,
       id,
       type,
-      sources,
-      iframeEmbeds: sources.map((s) => ({
-        name: s.name,
-        iframe: `<iframe src="${s.proxyUrl}" width="100%" height="500" allowfullscreen frameborder="0"></iframe>`,
-        directProxyUrl: s.proxyUrl,
-      })),
+      season: detailSe || null,
+      episode: detailEp || null,
+      sources: validSources,
+      streams: validSources.filter((s) => !s.isHLS),
+      hls: validSources.filter((s) => s.isHLS),
     });
   } catch (err) {
     req.log.error({ err }, "Streams error");
