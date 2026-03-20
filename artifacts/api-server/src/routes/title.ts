@@ -3,7 +3,8 @@ import { searchMovies } from "./search.js";
 
 const router = Router();
 
-const STREAMS_API = "https://testing-api-server.vercel.app/api/streams";
+const SITE_BASE = "https://themoviebox.org";
+const STREAMS_API = "https://testing-api-api-server.vercel.app/api/streams";
 
 interface StreamItem {
   format: string;
@@ -15,6 +16,23 @@ interface StreamItem {
   codecName: string;
 }
 
+function buildMovieboxUrl(
+  detailPath: string,
+  subjectId: string,
+  subjectType: number,
+  season: number | null,
+  episode: number | null,
+): string {
+  const isTV = subjectType !== 0 || season !== null || episode !== null;
+  const type = isTV ? "/tv/detail" : "/movie/detail";
+  const detailSe = isTV && season !== null ? String(season) : "";
+  const detailEp = isTV && episode !== null ? String(episode) : "";
+  return (
+    `${SITE_BASE}/movies/${detailPath}` +
+    `?id=${subjectId}&type=${encodeURIComponent(type)}&detailSe=${detailSe}&detailEp=${detailEp}&lang=en`
+  );
+}
+
 async function fetchStreamsForUrl(movieboxUrl: string): Promise<{
   success: boolean;
   streams: StreamItem[];
@@ -23,6 +41,7 @@ async function fetchStreamsForUrl(movieboxUrl: string): Promise<{
   coverUrl: string;
   se: number;
   ep: number;
+  totalEpisodes: number;
   freeNum: number;
   limited: boolean;
 } | null> {
@@ -38,7 +57,18 @@ async function fetchStreamsForUrl(movieboxUrl: string): Promise<{
       },
     );
     if (!res.ok) return null;
-    const data = (await res.json()) as { success: boolean; streams?: StreamItem[]; hls?: Array<{ url: string }>; title?: string; coverUrl?: string; se?: number; ep?: number; freeNum?: number; limited?: boolean };
+    const data = (await res.json()) as {
+      success: boolean;
+      streams?: StreamItem[];
+      hls?: Array<{ url: string }>;
+      title?: string;
+      coverUrl?: string;
+      se?: number;
+      ep?: number;
+      totalEpisodes?: number;
+      freeNum?: number;
+      limited?: boolean;
+    };
     if (!data.success || !data.streams?.length) return null;
     return {
       success: true,
@@ -48,6 +78,7 @@ async function fetchStreamsForUrl(movieboxUrl: string): Promise<{
       coverUrl: data.coverUrl || "",
       se: data.se ?? 1,
       ep: data.ep ?? 1,
+      totalEpisodes: data.totalEpisodes ?? 0,
       freeNum: data.freeNum ?? 0,
       limited: data.limited ?? false,
     };
@@ -61,14 +92,19 @@ router.get("/title", async (req, res) => {
   if (!stream || typeof stream !== "string" || stream.trim() === "") {
     res.status(400).json({
       error: "Query parameter 'stream' is required",
-      usage: "/api/title?stream=MovieName",
-      example: "/api/title?stream=Sankalp",
+      usage: "/api/title?stream=ShowName&season=1&episode=1",
+      example: "/api/title?stream=Devil+May+Cry&s=1&e=2",
     });
     return;
   }
 
+  const seasonRaw = req.query["season"] ?? req.query["s"];
+  const episodeRaw = req.query["episode"] ?? req.query["e"];
+  const season = seasonRaw ? parseInt(String(seasonRaw), 10) : null;
+  const episode = episodeRaw ? parseInt(String(episodeRaw), 10) : null;
+
   const query = stream.trim();
-  req.log.info({ query }, "Title stream lookup");
+  req.log.info({ query, season, episode }, "Title stream lookup");
 
   try {
     const results = await searchMovies(query);
@@ -78,7 +114,8 @@ router.get("/title", async (req, res) => {
       return;
     }
 
-    const host = req.headers["x-forwarded-host"] || req.headers["host"] || "localhost";
+    const host =
+      req.headers["x-forwarded-host"] || req.headers["host"] || "localhost";
     const protocol = req.headers["x-forwarded-proto"] || "http";
     const baseUrl = `${protocol}://${host}`;
 
@@ -86,8 +123,15 @@ router.get("/title", async (req, res) => {
     let foundMovie = null;
 
     for (const movie of results.filter((r) => r.hasResource)) {
-      req.log.info({ url: movie.movieboxUrl }, "Trying URL for streams");
-      streamsData = await fetchStreamsForUrl(movie.movieboxUrl);
+      const movieboxUrl = buildMovieboxUrl(
+        movie.detailPath,
+        movie.subjectId,
+        movie.subjectType,
+        season,
+        episode,
+      );
+      req.log.info({ url: movieboxUrl }, "Trying URL for streams");
+      streamsData = await fetchStreamsForUrl(movieboxUrl);
       if (streamsData) {
         foundMovie = movie;
         break;
@@ -98,7 +142,11 @@ router.get("/title", async (req, res) => {
       res.status(502).json({
         error: "Could not fetch streams for any search result",
         query,
-        tried: results.filter((r) => r.hasResource).map((r) => r.movieboxUrl),
+        season,
+        episode,
+        tried: results.filter((r) => r.hasResource).map((r) =>
+          buildMovieboxUrl(r.detailPath, r.subjectId, r.subjectType, season, episode),
+        ),
       });
       return;
     }
@@ -126,10 +174,22 @@ router.get("/title", async (req, res) => {
 
     res.json({
       query,
+      episode: {
+        season: streamsData.se,
+        episode: streamsData.ep,
+        totalEpisodes: streamsData.totalEpisodes || null,
+      },
       movie: {
         title: streamsData.title || foundMovie.title,
-        movieboxUrl: foundMovie.movieboxUrl,
+        movieboxUrl: buildMovieboxUrl(
+          foundMovie.detailPath,
+          foundMovie.subjectId,
+          foundMovie.subjectType,
+          season,
+          episode,
+        ),
         subjectId: foundMovie.subjectId,
+        subjectType: foundMovie.subjectType,
         poster: streamsData.coverUrl || foundMovie.poster,
         genre: foundMovie.genre,
         releaseDate: foundMovie.releaseDate,
@@ -149,3 +209,4 @@ router.get("/title", async (req, res) => {
 });
 
 export default router;
+
