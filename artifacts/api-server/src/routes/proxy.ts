@@ -1,9 +1,9 @@
-import { Router, type IRouter } from "express";
+import { Router } from "express";
 import type { IncomingMessage, ServerResponse } from "http";
 import https from "https";
 import http from "http";
 
-const router: IRouter = Router();
+const router = Router();
 
 router.get("/proxy", async (req, res) => {
   const url = req.query["url"];

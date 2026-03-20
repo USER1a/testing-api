@@ -1,7 +1,7 @@
-import { Router, type IRouter } from "express";
+import { Router } from "express";
 import { z } from "zod";
 
-const router: IRouter = Router();
+const router = Router();
 
 const HealthCheckResponse = z.object({ status: z.string() });
 

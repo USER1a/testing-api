@@ -1,6 +1,6 @@
-import { Router, type IRouter } from "express";
+import { Router } from "express";
 
-const router: IRouter = Router();
+const router = Router();
 
 const API_BASE = "https://h5-api.aoneroom.com";
 const SITE_BASE = "https://themoviebox.org";

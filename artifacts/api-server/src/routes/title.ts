@@ -1,7 +1,7 @@
-import { Router, type IRouter } from "express";
+import { Router } from "express";
 import { searchMovies } from "./search.js";
 
-const router: IRouter = Router();
+const router = Router();
 
 const STREAMS_API = "https://testing-api-server.vercel.app/api/streams";
 

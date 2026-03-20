@@ -1,6 +1,6 @@
-import { Router, type IRouter } from "express";
+import { Router } from "express";
 
-const router: IRouter = Router();
+const router = Router();
 
 const BASE_URL = "https://themoviebox.org";
 
