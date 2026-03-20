@@ -1,35 +1,10 @@
 import { Router } from "express";
 import { searchMovies } from "./search.js";
+import { resolveStreams } from "../lib/streams-helper.js";
 
 const router = Router();
 
 const SITE_BASE = "https://themoviebox.org";
-const UPSTREAM_STREAMS = "https://testing-api-server.vercel.app/api/streams";
-
-interface UpstreamStream {
-  format: string;
-  id: string;
-  url: string;
-  resolutions: string;
-  size: string;
-  duration: number;
-  codecName: string;
-}
-
-interface UpstreamResponse {
-  success: boolean;
-  subjectId: string;
-  slug: string;
-  title: string;
-  coverUrl: string;
-  se: number;
-  ep: number;
-  streams: UpstreamStream[];
-  hls: Array<{ url: string }>;
-  dash: Array<{ url: string }>;
-  freeNum: number;
-  limited: boolean;
-}
 
 function buildMovieboxUrl(
   detailPath: string,
@@ -46,26 +21,6 @@ function buildMovieboxUrl(
     `${SITE_BASE}/movies/${detailPath}` +
     `?id=${subjectId}&type=${encodeURIComponent(type)}&detailSe=${detailSe}&detailEp=${detailEp}&lang=en`
   );
-}
-
-async function fetchStreams(movieboxUrl: string): Promise<UpstreamResponse | null> {
-  try {
-    const res = await fetch(
-      `${UPSTREAM_STREAMS}?url=${encodeURIComponent(movieboxUrl)}`,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          Accept: "application/json",
-        },
-      },
-    );
-    if (!res.ok) return null;
-    const data = (await res.json()) as UpstreamResponse;
-    if (!data.success || !data.streams?.length) return null;
-    return data;
-  } catch {
-    return null;
-  }
 }
 
 router.get("/title", async (req, res) => {
@@ -101,8 +56,8 @@ router.get("/title", async (req, res) => {
     const protocol = req.headers["x-forwarded-proto"] || "https";
     const baseUrl = `${protocol}://${host}`;
 
-    let upstreamData: UpstreamResponse | null = null;
     let foundMovie = null;
+    let foundSources = null;
 
     for (const movie of results.filter((r) => r.hasResource)) {
       const movieboxUrl = buildMovieboxUrl(
@@ -113,14 +68,15 @@ router.get("/title", async (req, res) => {
         episode,
       );
       req.log.info({ url: movieboxUrl }, "Trying URL for streams");
-      upstreamData = await fetchStreams(movieboxUrl);
-      if (upstreamData) {
+      const sources = await resolveStreams(movieboxUrl);
+      if (sources.length) {
         foundMovie = movie;
+        foundSources = sources;
         break;
       }
     }
 
-    if (!upstreamData || !foundMovie) {
+    if (!foundSources || !foundMovie) {
       res.status(502).json({
         error: "Could not fetch streams for this title.",
         hint: "Try omitting season/episode to get the default, or check the title spelling.",
@@ -131,54 +87,52 @@ router.get("/title", async (req, res) => {
       return;
     }
 
-    const streams = upstreamData.streams
-      .filter((s) => s.url && s.url.startsWith("http"))
+    const movieboxUrl = buildMovieboxUrl(
+      foundMovie.detailPath,
+      foundMovie.subjectId,
+      foundMovie.subjectType,
+      season,
+      episode,
+    );
+
+    const streams = foundSources
+      .filter((s) => !s.isHLS)
       .map((s) => {
-        const playerUrl = `${baseUrl}/api/proxy?url=${encodeURIComponent(s.url)}`;
+        const playerUrl = `${baseUrl}/api/proxy?url=${encodeURIComponent(s.embedUrl)}`;
         return {
-          format: s.format,
-          resolution: `${s.resolutions}p`,
-          duration: s.duration,
-          sizeMB: s.size ? Math.round(Number(s.size) / 1024 / 1024) : null,
-          codec: s.codecName,
-          originalUrl: s.url,
+          name: s.name,
+          originalUrl: s.embedUrl,
           playerUrl,
           iframe: `<iframe src="${playerUrl}" width="100%" height="500" allowfullscreen frameborder="0" allow="autoplay; encrypted-media"></iframe>`,
         };
       });
 
-    const hlsStreams = upstreamData.hls
-      .filter((h) => h.url && h.url.startsWith("http"))
-      .map((h) => ({
-        originalUrl: h.url,
-        playerUrl: `${baseUrl}/api/proxy?url=${encodeURIComponent(h.url)}`,
+    const hlsStreams = foundSources
+      .filter((s) => s.isHLS)
+      .map((s) => ({
+        name: s.name,
+        originalUrl: s.embedUrl,
+        playerUrl: `${baseUrl}/api/proxy?url=${encodeURIComponent(s.embedUrl)}`,
       }));
 
-    const primaryStream = streams[streams.length - 1] || null;
+    const primaryStream = streams[0] || hlsStreams[0] || null;
 
     res.json({
       query,
       requested: { season, episode },
-      returned: { season: upstreamData.se, episode: upstreamData.ep },
       movie: {
-        title: upstreamData.title || foundMovie.title,
+        title: foundMovie.title,
         subjectId: foundMovie.subjectId,
         subjectType: foundMovie.subjectType,
-        poster: upstreamData.coverUrl || foundMovie.poster,
+        poster: foundMovie.poster,
         genre: foundMovie.genre,
         releaseDate: foundMovie.releaseDate,
         country: foundMovie.country,
         imdbRating: foundMovie.imdbRating,
-        movieboxUrl: buildMovieboxUrl(
-          foundMovie.detailPath,
-          foundMovie.subjectId,
-          foundMovie.subjectType,
-          season,
-          episode,
-        ),
+        movieboxUrl,
       },
       playerUrl: primaryStream?.playerUrl || null,
-      embedIframe: primaryStream?.iframe || null,
+      embedIframe: "iframe" in (primaryStream ?? {}) ? (primaryStream as { iframe: string }).iframe : null,
       streams,
       hls: hlsStreams,
     });
